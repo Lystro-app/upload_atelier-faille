@@ -12,3 +12,4 @@ data/*
 !data/printify-catalog.json
 # mockup-lists.json is user-editable at runtime (order, uploads) and lives only
 # on the server so live edits survive deploys.
+scripts/.remock.env

@@ -21,52 +21,95 @@ const SYSTEM_PROMPT = [
   'Antworte ausschließlich als JSON: {"title": "...", "description": "...", "seoTitle": "...", "seoDescription": "..."}',
 ].join("\n");
 
+interface TitleResult {
+  title?: string;
+  description?: string;
+  seoTitle?: string;
+  seoDescription?: string;
+}
+
+// OpenAI (Vision) — genutzt wenn OPENAI_API_KEY gesetzt. Gleicher Prompt/Output.
+async function titleViaOpenAI(
+  imageBase64: string,
+  mimeType: string,
+  userText: string
+): Promise<TitleResult> {
+  const key = process.env.OPENAI_API_KEY!;
+  const model = process.env.OPENAI_MODEL || "gpt-4o";
+  const r = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+    body: JSON.stringify({
+      model,
+      temperature: 0.9,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: userText },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Benenne dieses Motiv gemäß den Regeln. Antworte nur als JSON." },
+            { type: "image_url", image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
+          ],
+        },
+      ],
+    }),
+  });
+  if (!r.ok) throw new Error(`OpenAI ${r.status}: ${await r.text()}`);
+  const data: any = await r.json();
+  const text: string = data?.choices?.[0]?.message?.content || "{}";
+  return JSON.parse(text);
+}
+
+async function titleViaGemini(
+  imageBase64: string,
+  mimeType: string,
+  userText: string
+): Promise<TitleResult> {
+  const key = process.env.GEMINI_API_KEY!;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${encodeURIComponent(key)}`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [
+        { parts: [{ text: userText }, { inline_data: { mime_type: mimeType, data: imageBase64 } }] },
+      ],
+      generationConfig: { responseMimeType: "application/json", temperature: 0.9 },
+    }),
+  });
+  if (!r.ok) throw new Error(`Gemini ${r.status}: ${await r.text()}`);
+  const data: any = await r.json();
+  const text: string = data?.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+  return JSON.parse(text);
+}
+
 export function createGeminiRouter(): Router {
   const router = express.Router();
 
   router.post("/title", async (req, res) => {
     try {
-      const key = process.env.GEMINI_API_KEY;
-      if (!key) return res.status(500).json({ error: "GEMINI_API_KEY missing" });
       const { imageBase64, mimeType, hint } = req.body || {};
       if (!imageBase64 || !mimeType) {
         return res.status(400).json({ error: "imageBase64 and mimeType required" });
       }
-
+      const useOpenAI = !!process.env.OPENAI_API_KEY;
+      if (!useOpenAI && !process.env.GEMINI_API_KEY) {
+        return res.status(500).json({ error: "OPENAI_API_KEY oder GEMINI_API_KEY erforderlich" });
+      }
       const userText = hint ? `${SYSTEM_PROMPT}\n\nHinweis vom Nutzer: ${hint}` : SYSTEM_PROMPT;
 
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${encodeURIComponent(key)}`;
-      const r = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [
-            {
-              parts: [
-                { text: userText },
-                { inline_data: { mime_type: mimeType, data: imageBase64 } },
-              ],
-            },
-          ],
-          generationConfig: {
-            responseMimeType: "application/json",
-            temperature: 0.9,
-          },
-        }),
-      });
-      if (!r.ok) {
-        return res.status(500).json({ error: `Gemini ${r.status}: ${await r.text()}` });
-      }
-      const data: any = await r.json();
-      const text: string = data?.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
-      let parsed: { title?: string; description?: string; seoTitle?: string; seoDescription?: string } = {};
+      let parsed: TitleResult = {};
       try {
-        parsed = JSON.parse(text);
-      } catch {
-        // ignore
+        parsed = useOpenAI
+          ? await titleViaOpenAI(imageBase64, mimeType, userText)
+          : await titleViaGemini(imageBase64, mimeType, userText);
+      } catch (e: any) {
+        return res.status(500).json({ error: e.message });
       }
+
       if (!parsed.title) {
-        return res.status(500).json({ error: "no title in Gemini response", raw: text });
+        return res.status(500).json({ error: `no title in ${useOpenAI ? "OpenAI" : "Gemini"} response` });
       }
       res.json({
         title: parsed.title,

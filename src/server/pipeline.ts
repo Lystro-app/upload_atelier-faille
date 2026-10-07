@@ -9,6 +9,11 @@ import express, { type Router } from "express";
 import { createCanvas, loadImage } from "@napi-rs/canvas";
 import { renderMockup, renderStaticImage } from "./render";
 import { resolveMockupFile, getMockupLists } from "./mockups";
+import { createMedusaProductFromPrintify } from "./medusa";
+
+// Publish-Ziel. "printify" = nur Printify-Produkt (default, Shopify ist tot).
+// "medusa" = zusätzlich Medusa-Draft anlegen. "shopify" = Legacy-Shopify-Publish.
+type Target = "printify" | "medusa" | "shopify" | "both";
 
 type Orientation = "vertical" | "horizontal";
 type Scope = "auto" | "vertical" | "horizontal" | "both";
@@ -60,14 +65,16 @@ export interface PipelineInput {
   filename?: string;
   title?: string;      // gesetzt = überschreibt Gemini, Gemini-Call entfällt
   scope?: Scope;
-  publish?: boolean;   // default true — bei false nur Printify-Produkt anlegen, nicht published
-  dryRun?: boolean;    // nur rendern + Gemini, keine Printify/Shopify-Writes
+  target?: Target;     // default "printify"
+  publish?: boolean;   // nur für target shopify/both relevant
+  dryRun?: boolean;    // nur rendern + Gemini, keine Writes
 }
 
 export interface PipelineProduct {
   type: "stretched" | "framed";
   printifyId?: string;
   shopifyProductId?: string;
+  medusaProductId?: string;
   mockupsAttached?: number;
   error?: string;
 }
@@ -93,6 +100,7 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineResult>
   const log: string[] = [];
   const push = (m: string) => { log.push(m); };
   const scope: Scope = input.scope || "auto";
+  const target: Target = input.target || "printify";
   const publish = input.publish !== false;
   const dryRun = !!input.dryRun;
 
@@ -191,7 +199,24 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineResult>
       const printifyId: string = (await prR.json()).id;
       push(`${type}: Printify-Produkt ${printifyId} erstellt`);
 
-      if (!publish) return { type, printifyId, mockupsAttached: 0 };
+      const result: PipelineProduct = { type, printifyId, mockupsAttached: 0 };
+
+      // Medusa-Target: Draft-Produkt im Live-Shop anlegen (aus Printify + Mockups)
+      if (target === "medusa" || target === "both") {
+        try {
+          const mr = await createMedusaProductFromPrintify({
+            type, title, description, printifyId, mockups: out,
+          });
+          result.medusaProductId = mr.productId;
+          push(`${type}: Medusa-Produkt ${mr.productId} angelegt (${mr.variants} Var, ${mr.images} Bilder, draft)`);
+        } catch (e: any) {
+          push(`${type}: Medusa FEHLER ${e.message}`);
+          result.error = `medusa: ${e.message}`;
+        }
+      }
+
+      // Shopify-Publish nur bei Legacy-Target shopify/both und publish!=false.
+      if (!(target === "shopify" || target === "both") || !publish) return result;
 
       const pubR = await api(`/api/printify/products/${printifyId}/publish`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
@@ -281,6 +306,7 @@ export function createPipelineRouter(): Router {
         filename: body.filename,
         title: body.title,
         scope: body.scope,
+        target: body.target,
         publish: body.publish,
         dryRun: body.dryRun,
       });

@@ -2,8 +2,8 @@
 // Produkt an (Draft). Spiegelt die bestehende Medusa-Katalogstruktur:
 // Größe-Option + Preise aus data/pricing.json, printify-ids in Variant-Metadata.
 //
-// Admin-Passwort wird NICHT hardcoded — zur Laufzeit aus dem vorhandenen
-// import-shopify.mjs gelesen (wie af-remock.ts), oder aus MEDUSA_ADMIN_PASSWORD.
+// Admin password comes only from MEDUSA_ADMIN_PASSWORD. It is read when a
+// Medusa request runs (after dotenv), not from a file on disk.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -16,13 +16,13 @@ const PF_TOKEN = () => process.env.PRINTIFY_API_TOKEN!;
 const PF_SHOP = () => process.env.PRINTIFY_SHOP_ID!;
 
 function adminPassword(): string {
-  if (process.env.MEDUSA_ADMIN_PASSWORD) return process.env.MEDUSA_ADMIN_PASSWORD;
-  const canonical =
-    "/Users/benlangeheinecke/Documents/Business Backend/Atelier Faille Shop/import-shopify.mjs";
-  const src = fs.readFileSync(canonical, "utf8");
-  const m = src.match(/PASSWORD\s*=\s*["'`]([^"'`]+)["'`]/);
-  if (!m) throw new Error("Medusa-Admin-Passwort nicht auffindbar");
-  return m[1];
+  const password = process.env.MEDUSA_ADMIN_PASSWORD;
+  if (!password) {
+    throw new Error(
+      "MEDUSA_ADMIN_PASSWORD is not set. Set it in the environment before publishing to Medusa."
+    );
+  }
+  return password;
 }
 
 let token = "";

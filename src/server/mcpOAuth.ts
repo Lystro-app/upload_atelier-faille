@@ -19,11 +19,22 @@ import { SignJWT, jwtVerify } from "jose";
 
 const ISSUER = (process.env.APP_URL || "").replace(/\/$/, "");
 const RESOURCE = `${ISSUER}/mcp`;
-const SECRET = new TextEncoder().encode(
-  process.env.MCP_OAUTH_SECRET || "insecure-dev-secret-change-me"
-);
 const LOGIN_PASSWORD = process.env.MCP_LOGIN_PASSWORD || "";
 const ALG = "HS256";
+
+// Resolved on use, not at import. server.ts imports this module before
+// dotenv.config(), so a module-level read would miss .env.local and a
+// module-level throw would stop local dev before env is loaded.
+function oauthSecret(): Uint8Array {
+  const secret = process.env.MCP_OAUTH_SECRET;
+  if (!secret) {
+    throw new Error(
+      "MCP_OAUTH_SECRET is not set. Refusing to start so /mcp tokens cannot be forged. " +
+        "Set MCP_OAUTH_SECRET to a random value (openssl rand -hex 32)."
+    );
+  }
+  return new TextEncoder().encode(secret);
+}
 
 const CODE_TTL = 300;            // 5 min
 const ACCESS_TTL = 3600;         // 1 h
@@ -59,7 +70,7 @@ async function signToken(payload: Record<string, unknown>, ttl: number, aud?: st
     .setIssuedAt()
     .setExpirationTime(`${ttl}s`);
   if (aud) b.setAudience(aud);
-  return b.sign(SECRET);
+  return b.sign(oauthSecret());
 }
 
 // ── Bearer-Verify-Middleware für /mcp ────────────────────────────────────────
@@ -74,7 +85,7 @@ export async function verifyBearer(req: Request, res: Response, next: NextFuncti
   const header = req.headers.authorization || "";
   if (!header.startsWith("Bearer ")) return challenge();
   try {
-    const { payload } = await jwtVerify(header.slice(7), SECRET, {
+    const { payload } = await jwtVerify(header.slice(7), oauthSecret(), {
       issuer: ISSUER,
       audience: RESOURCE,
     });
@@ -119,6 +130,8 @@ function escapeHtml(s: string): string {
 }
 
 export function createMcpOAuthRouter(): Router {
+  // Fail closed once environment files have been loaded (see oauthSecret).
+  oauthSecret();
   const router = express.Router();
   const form = express.urlencoded({ extended: true });
 
@@ -225,7 +238,7 @@ export function createMcpOAuthRouter(): Router {
 
     try {
       if (grant === "authorization_code") {
-        const { payload } = await jwtVerify(String(b.code || ""), SECRET, { issuer: ISSUER });
+        const { payload } = await jwtVerify(String(b.code || ""), oauthSecret(), { issuer: ISSUER });
         if (payload.typ !== "code") return res.status(400).json({ error: "invalid_grant" });
         if (payload.ru !== String(b.redirect_uri || "")) {
           return res.status(400).json({ error: "invalid_grant", error_description: "redirect_uri mismatch" });
@@ -244,7 +257,7 @@ export function createMcpOAuthRouter(): Router {
       }
 
       if (grant === "refresh_token") {
-        const { payload } = await jwtVerify(String(b.refresh_token || ""), SECRET, { issuer: ISSUER });
+        const { payload } = await jwtVerify(String(b.refresh_token || ""), oauthSecret(), { issuer: ISSUER });
         if (payload.typ !== "rt") return res.status(400).json({ error: "invalid_grant" });
         const aud = String(payload.aud || RESOURCE);
         const scope = String(payload.scope || "mcp");
